@@ -7,16 +7,30 @@ const fields={
  r:['实际政策利率','Real policy rate',0,6,.25,2],x:['风险溢价','Risk premium',0,5,.25,2],
  c:['边际消费倾向','Propensity to consume',.45,.63,.01,.6],b:['投资利率敏感度','Investment sensitivity',.5,2,.1,1],
  m:['价格加成率','Price markup',2,8,.5,5],s:['国民储蓄率','Saving rate',0,100,.1,20],
- d:['折旧率','Depreciation',1,10,.5,5],a:['技术进步率','Productivity growth',0,5,.25,1],n:['劳动增长率','Labour growth',0,3,.25,1]};
+ d:['折旧率','Depreciation',1,10,.5,5],a:['技术进步率','Productivity growth',0,5,.25,1],n:['劳动增长率','Labour growth',0,3,.25,1],
+ q:['进口倾向（开放度）','Import propensity (openness)',0,.3,.01,.1],mu:['贸易的汇率敏感度','Trade sensitivity to ε',0,10,.25,3],
+ Ys:['外国产出','Foreign output',80,120,1,100],rs:['外国实际利率','Foreign real rate',0,6,.25,2],ps:['外国通胀率','Foreign inflation',0,6,.25,2],
+ E:['名义汇率钉住水平','Nominal exchange-rate peg',70,130,.5,100]};
+const sym={Ys:'Y*',rs:'r*',ps:'π*',mu:'μ',E:'Ē'};
 let ranges={}, editing=false;
 let fraction=0, segmentEnd=null, lastFrame=0;
-const metrics=()=>long?['Y','I','k','worker']:['Y','I','u','pi'];
-const percent=k=>'rxmsdan'.includes(k);
-const names={Y:['实际产出','Output'],I:['投资','Investment'],u:['失业率','Unemployment'],pi:['通胀率','Inflation'],k:['资本存量','Capital stock'],worker:['人均劳动产出','Output per worker']};
+const metrics=()=>long?['Y','I','k','worker']:['Y','I','u','pi','NX','eps'];
+const percent=k=>['r','x','m','s','d','a','n','rs','ps'].includes(k);
+const unit=k=>['pi','u'].includes(k)?'%':'';
+const names={Y:['实际产出','Output'],I:['投资','Investment'],u:['失业率','Unemployment'],pi:['通胀率','Inflation'],k:['资本存量','Capital stock'],worker:['人均劳动产出','Output per worker'],NX:['净出口','Net exports'],eps:['实际汇率','Real exchange rate']};
 let regime;
+// Open economy (Blanchard convention): ε = E·P/P*, a rise means real appreciation of the home currency.
+const policyRate=p=>p.fx==='peg'?p.rs:p.r;
+function exchange(p,P){
+ // Float: uncovered interest parity with the expected real rate anchored at 100. Peg: E is fixed, ε moves with relative prices.
+ const eps=p.fx==='peg'?p.E*P/100:100*(1+policyRate(p)/100)/(1+p.rs/100);
+ return {eps,E:eps*100/P,price:p.q*regime.scale*p.mu*(eps-100)/2};
+}
 function medium(prev,p){
- const potential=regime.scale*(105-p.m),Y=(regime.consumption+regime.investment+p.G-p.c*p.T-p.b*(p.r+p.x))/(1-p.c-.1);
- return {Y,k:prev.k===undefined?3*Y:prev.k*(1-p.d/100)+prev.I,I:regime.investment+.1*Y-p.b*(p.r+p.x),u:100*(1-Y/(110*regime.scale)),pi:prev.pi+.05*(Y-potential)/regime.scale,potential};
+ const S=regime.scale,r=policyRate(p),P=prev.P??100,{eps,E,price}=exchange(p,P),potential=S*(105-p.m);
+ const Y=(regime.consumption+regime.investment+p.G-p.c*p.T-p.b*(r+p.x)+p.q*S*p.Ys-2*price)/(1-p.c-.1+p.q);
+ const X=p.q*S*p.Ys-price,IM=p.q*Y+price,pi=prev.pi+.05*(Y-potential)/S;
+ return {Y,k:prev.k===undefined?3*Y:prev.k*(1-p.d/100)+prev.I,I:regime.investment+.1*Y-p.b*(r+p.x),u:100*(1-Y/(110*S)),pi,potential,X,IM,NX:X-IM,eps,E,P:P*(1+(pi-p.ps)/100)};
 }
 function next(prev){
  if(!long)return medium(prev,config);
@@ -25,9 +39,9 @@ function next(prev){
  return {Y,k,N,A,potential,gap,I:Y*config.s/100,worker:Y/N};
 }
 function reset(){
- stop();fraction=0;segmentEnd=null;ranges={};editing=false;long=false;pending=false;marker=null;changes=[];config=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v[5]]));
+ stop();fraction=0;segmentEnd=null;ranges={};editing=false;long=false;pending=false;marker=null;changes=[];config=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v[5]]));config.fx='float';
  regime={scale:1,consumption:10,investment:16};
- history=[];for(const G of [17,17,18,19,20,20])history.push(medium(history.at(-1)||{pi:3.5},{...config,G}));
+ history=[];for(const G of [17,17,18,19,20,20])history.push(medium(history.at(-1)||{pi:3.5},{...config,G}));history.at(-1).P=100;
  el('speed').selectedIndex=0;setup();
 }
 function stop(){
@@ -68,12 +82,14 @@ function enter(){
  stop();
  marker=history.length-1;
  if(long){
-  const scale=prev.potential/(105-config.m);
-  regime={
-   scale,
-   investment:prev.I-.1*prev.Y+config.b*(config.r+config.x),
-   consumption:prev.Y-prev.I-config.G-config.c*(prev.Y-config.T)
-  };
+  const scale=prev.potential/(105-config.m),r=policyRate(config);
+  regime={scale};
+  prev.P=100;
+  const {eps,E,price}=exchange(config,100);
+  Object.assign(prev,{eps,E,X:config.q*scale*config.Ys-price,IM:config.q*prev.Y+price});
+  prev.NX=prev.X-prev.IM;
+  regime.investment=prev.I-.1*prev.Y+config.b*(r+config.x);
+  regime.consumption=prev.Y-prev.I-config.G-prev.NX-config.c*(prev.Y-config.T);
   prev.pi=Number(el('initialPi').value);
   prev.u=100*(1-prev.Y/(110*scale));
   prev.returned=true;
@@ -92,23 +108,37 @@ function setup(){
  el('info').textContent=t('ⓘ 切换时的默认数据','ⓘ Transition assumptions');
  el('piLabel').hidden=!long;
  el('piText').textContent=t('返回中期的初始通胀率（%）','Starting inflation on return (%)');
- el('assumptions').textContent=t('切换按整期交接，保留实际产出、潜在产出、投资和资本。进入长期时，储蓄率取当期投资率。返回中期时，沿用上次的政府支出、净税收、利率和风险溢价，以当前消费和投资重新校准需求方程。长期没有通胀读数，返回时默认沿用上次中期末值，可在长期阶段修改。','Transitions settle at period boundaries and carry over output, potential output, investment and capital. Saving starts at the investment share. Returning restores fiscal settings, interest rate and risk premium and calibrates demand to current consumption and investment. Inflation starts at its last medium-run reading; you can edit it during the long run.');
+ el('assumptions').textContent=t('切换按整期交接，保留实际产出、潜在产出、投资和资本。进入长期时，储蓄率取当期投资率。返回中期时，沿用上次的政府支出、净税收、利率和风险溢价，以当前消费和投资重新校准需求方程。长期没有通胀读数，返回时默认沿用上次中期末值，可在长期阶段修改。','Transitions settle at period boundaries and carry over output, potential output, investment and capital. Saving starts at the investment share. Returning restores fiscal settings, interest rate and risk premium and calibrates demand to current consumption and investment. Inflation starts at its last medium-run reading; you can edit it during the long run.')+t('长期 Solow 阶段按贸易平衡处理（储蓄等于国内投资）；返回中期时相对价格重新归一（P/P* = 100），按当前汇率制度重算汇率和净出口。',' The long-run Solow phase assumes balanced trade (saving equals domestic investment); on return relative prices are re-normalised (P/P* = 100) and the exchange rate and net exports are recomputed under the current regime.');
  el('title').textContent=t('宏观经济图谱','An atlas of macroeconomics');el('panel').textContent=t('参数设定','Parameters');
  el('lang').textContent=en?'中文':'English';el('reset').textContent=t('重新开始','Restart');
  el('phase').textContent=long?t('长期增长  ·  Solow','Long-run growth  ·  Solow'):t('中期经济  ·  IS–LM–PC','Medium-run economy  ·  IS–LM–PC');
- const metrics=long?['Y','I','k','worker']:['Y','I','u','pi'],old=el('metric').value;
- el('metric').replaceChildren(...metrics.map(k=>new Option(names[k][+en],k)));el('metric').value=metrics.includes(old)?old:'Y';
+ const metricList=metrics(),old=el('metric').value;
+ el('metric').replaceChildren(...metricList.map(k=>new Option(names[k][+en],k)));el('metric').value=metricList.includes(old)?old:'Y';
  el('metric').ariaLabel=t('指标','Measure');el('speed').ariaLabel=t('播放速度','Playback speed');
- const groups=long?[[t('社会储蓄','Saving'),['s']],[t('增长参数','Growth parameters'),['d','a','n']]]:[[t('政府','Government'),['G','T']],[t('中央银行','Central bank'),['r']],[t('金融市场','Financial markets'),['x']],[t('结构参数','Economic structure'),['c','b','m']]];
+ const peg=config.fx==='peg';
+ const groups=long?[[t('社会储蓄','Saving'),['s']],[t('增长参数','Growth parameters'),['d','a','n']]]:[[t('政府','Government'),['G','T']],[t('中央银行','Central bank'),['r']],[t('金融市场','Financial markets'),['x']],[t('对外部门','External sector'),['fx','Ys','rs','ps',...(peg?['E']:[])]],[t('结构参数','Economic structure'),['c','b','m','q','mu']]];
+ const opened=[...el('params').children].map(d=>d.open),keep=opened.length===groups.length;
  el('params').replaceChildren();
- groups.forEach(([name,keys],i)=>{const group=document.createElement('details');group.open=i===0;const head=document.createElement('summary');head.textContent=name;group.append(head);
- for(const key of keys){const f=fields[key],wrap=document.createElement('div'),label=document.createElement('label'),num=document.createElement('input'),input=document.createElement('input');
- wrap.className='param';label.append(f[+en]+' · '+key+(percent(key)?' (%)':''),num);wrap.append(label,input);
- num.type='number';input.type='range';for(const control of [input,num]){control.min=f[2];control.max=f[3];control.step=key==='c'?.001:.01;control.value=Number(config[key].toFixed(key==='c'?3:2));control.ariaLabel=f[+en]}
- function update(control,other){const v=control.valueAsNumber;if(!Number.isFinite(v)||!control.validity.valid)return;config[key]=v;other.value=v;pending=true;changes=changes.filter(e=>e.time!==history.length+(segmentEnd?1:0)||e.key!==key);changes.push({time:history.length+(segmentEnd?1:0),key,value:v});render()}
+ const record=(key,value)=>{const time=history.length+(segmentEnd?1:0);pending=true;changes=changes.filter(e=>e.time!==time||e.key!==key);changes.push({time,key,value})};
+ groups.forEach(([name,keys],i)=>{const group=document.createElement('details');group.open=keep?opened[i]:i===0;const head=document.createElement('summary');head.textContent=name;group.append(head);
+ for(const key of keys){
+ if(key==='fx'){const wrap=document.createElement('div'),label=document.createElement('label'),select=document.createElement('select');wrap.className='param';
+  select.append(new Option(t('浮动汇率','Floating'),'float'),new Option(t('固定汇率（钉住）','Fixed (peg)'),'peg'));select.value=config.fx;select.ariaLabel=t('汇率制度','Exchange-rate regime');
+  label.append(t('汇率制度','Exchange-rate regime'),select);wrap.append(label);
+  select.onchange=()=>{const b=segmentEnd??history.at(-1);config.fx=select.value;
+   // Keep ε continuous at the switch: peg E at the level implied by the boundary state; the policy rate is tied to r*.
+   if(config.fx==='peg')config.E=Math.min(130,Math.max(70,Number(((b.eps??100)*100/(b.P??100)).toFixed(2))));
+   config.r=config.rs;record('fx',config.fx);setup()};
+  group.append(wrap);continue}
+ const f=fields[key],wrap=document.createElement('div'),label=document.createElement('label'),num=document.createElement('input'),input=document.createElement('input'),locked=key==='r'&&peg;
+ wrap.className='param';label.append(f[+en]+' · '+(sym[key]??key)+(percent(key)?' (%)':'')+(locked?t('（钉住时跟随 r*）',' (tracks r* under peg)'):''),num);wrap.append(label,input);
+ num.type='number';input.type='range';for(const control of [input,num]){control.min=f[2];control.max=f[3];control.step=['c','q'].includes(key)?.001:.01;control.value=Number(config[key].toFixed(['c','q'].includes(key)?3:2));control.ariaLabel=f[+en];control.disabled=locked;control.dataset.key=key}
+ function update(control,other){const v=control.valueAsNumber;if(!Number.isFinite(v)||!control.validity.valid)return;config[key]=v;other.value=v;
+  if(key==='rs'&&config.fx==='peg'){config.r=v;document.querySelectorAll('[data-key=r]').forEach(c=>c.value=v)}
+  record(key,v);render()}
  input.onpointerdown=()=>{editing=true};input.oninput=()=>update(input,num);num.oninput=()=>{editing=true;update(num,input)};num.onblur=()=>{num.value=input.value;editing=false;render()};
  group.append(wrap)}el('params').append(group)});
- el('minis').replaceChildren(...Array.from({length:3},()=>{const btn=document.createElement('button');btn.append(document.createElement('span'),document.createElement('canvas'));btn.onclick=()=>{el('metric').value=btn.dataset.key;render()};return btn}));
+ el('minis').replaceChildren(...Array.from({length:metricList.length-1},()=>{const btn=document.createElement('button');btn.append(document.createElement('span'),document.createElement('canvas'));btn.onclick=()=>{el('metric').value=btn.dataset.key;render()};return btn}));
  render();
 }
 function visibleState(){
@@ -121,10 +151,15 @@ function visibleState(){
 function render(){
  const prev=visibleState(),time=(history.length-1+fraction).toFixed(2),key=el('metric').value;
  el('figure').textContent=t('经济轨迹','Economic trajectory');el('legend').textContent=t('━━ 历史　┄┄ 条件预测','━━ History　┄┄ Conditional forecast');
- el('context').hidden=key!=='Y';el('potential').textContent=t('潜在产出 ','Potential output ')+prev.potential.toFixed(1)+t(' · 当前缺口 ',' · Current gap ')+((prev.Y/prev.potential-1)*100).toFixed(1)+'% ⓘ';
- el('explain').textContent=t('潜在产出是正常就业水平下可持续生产的产量。例如潜在产出为 100、实际产出为 95，缺口就是 −5%。','Potential output is sustainable production at normal employment. Output of 95 against potential of 100 means a −5% gap.');
+ el('context').hidden=!['Y','NX','eps'].includes(key);
+ if(key==='Y'){el('potential').textContent=t('潜在产出 ','Potential output ')+prev.potential.toFixed(1)+t(' · 当前缺口 ',' · Current gap ')+((prev.Y/prev.potential-1)*100).toFixed(1)+'% ⓘ';
+ el('explain').textContent=t('潜在产出是正常就业水平下可持续生产的产量。例如潜在产出为 100、实际产出为 95，缺口就是 −5%。','Potential output is sustainable production at normal employment. Output of 95 against potential of 100 means a −5% gap.')}
+ else if(key==='NX'){el('potential').textContent=t('出口 ','Exports ')+prev.X.toFixed(2)+t(' · 进口 ',' · Imports ')+prev.IM.toFixed(2)+t(' · 占产出 ',' · Share of output ')+(100*prev.NX/prev.Y).toFixed(2)+'% ⓘ';
+ el('explain').textContent=t('Y = C + I + G + NX，NX = 出口 − 进口。进口随本国产出增加（进口倾向 q），出口随外国产出 Y* 增加；本币实际升值（ε 上升）使出口减少、进口增加（敏感度 μ）。开放度越高，财政乘数 1/(1−c−0.1+q) 越小，因为一部分需求漏向国外。','Y = C + I + G + NX, with NX = exports − imports. Imports rise with home output (propensity q), exports with foreign output Y*; a real appreciation (higher ε) cuts exports and raises imports (sensitivity μ). More openness shrinks the multiplier 1/(1−c−0.1+q) as demand leaks abroad.')}
+ else{el('potential').textContent=t('名义汇率 E ','Nominal rate E ')+prev.E.toFixed(2)+t(' · 相对价格 P/P* ',' · Relative prices P/P* ')+(prev.eps/prev.E*100).toFixed(2)+(config.fx==='peg'?t(' · 固定汇率',' · Pegged'):t(' · 浮动汇率',' · Floating'))+' ⓘ';
+ el('explain').textContent=t('ε = E·P/P*，上升表示本币实际升值。浮动汇率下由利率平价决定：ε = 100·(1+r)/(1+r*)，加息会使本币升值、压低净出口。固定汇率下 E 被钉住，央行利率必须等于 r*，货币政策失效；此时 ε 随本外通胀差缓慢变化，本国通胀高于 π* 会持续侵蚀竞争力。下调 Ē 即为贬值。','ε = E·P/P*; a rise is a real appreciation. Under floating rates interest parity sets ε = 100·(1+r)/(1+r*), so a rate hike appreciates the currency and lowers net exports. Under a peg E is fixed and the policy rate must equal r*, so monetary policy is gone; ε then drifts with the inflation gap, and inflation above π* steadily erodes competitiveness. Lowering Ē is a devaluation.')}
  el('fit').textContent=t('适配视图','Fit view');
- el('play').textContent=timer?t('Ⅱ 暂停','Ⅱ Pause'):t('▶ 播放','▶ Play');el('clock').textContent=t('第 '+time+' 期','Period '+time)+'　·　'+names[key][+en]+' '+prev[key].toFixed(2)+(['pi','u'].includes(key)?'%':'');
+ el('play').textContent=timer?t('Ⅱ 暂停','Ⅱ Pause'):t('▶ 播放','▶ Play');el('clock').textContent=t('第 '+time+' 期','Period '+time)+'　·　'+names[key][+en]+' '+prev[key].toFixed(2)+unit(key);
  el('event').textContent=pending?t('参数已调整，将从下一期生效。','Parameter changes take effect next period.'):long?t('第 '+marker+' 期进入长期。','Entered the long run at period '+marker+'.'):marker!==null?t('第 '+marker+' 期返回中期。','Returned to the medium run at period '+marker+'.'):t('初始示例：第 2 至 4 期，政府支出由 17 逐步恢复至 20。','Opening scenario: public spending recovers from 17 to 20 over periods 2–4.');
  el('transition').textContent=long?t('从当前年份进入中期 →','Enter medium run from this year →'):t('进入长期 →','Enter long run →');
  const boundary=segmentEnd??history.at(-1);
@@ -132,7 +167,7 @@ function render(){
  el('hint').textContent=long?t('每期一年，继承的产出缺口每年收窄四分之一。','Annual periods; the inherited gap shrinks by one quarter each year.'):
  (pending?t('切换时先结算一期 · ','Switch applies one pending period · '):'')+t('初始储蓄率 ','Initial saving rate ')+(100*base.I/base.Y).toFixed(2)+'%';
  draw(key,el('plot'),false);
- metrics().filter(k=>k!==key).forEach((k,i)=>{const btn=el('minis').children[i];btn.dataset.key=k;btn.firstChild.textContent=names[k][+en]+' · '+prev[k].toFixed(2)+(['u','pi'].includes(k)?'%':'');draw(k,btn.lastChild,true)});
+ metrics().filter(k=>k!==key).forEach((k,i)=>{const btn=el('minis').children[i];btn.dataset.key=k;btn.firstChild.textContent=names[k][+en]+' · '+prev[k].toFixed(2)+unit(k);draw(k,btn.lastChild,true)});
 }
 function draw(key,canvas,small){
  const w=canvas.clientWidth,h=canvas.clientHeight,ratio=devicePixelRatio;
@@ -159,7 +194,7 @@ function draw(key,canvas,small){
  line(key,now,data.length-1,'#284b46',[6,5]);c.restore();
  c.restore();c.fillStyle='#85412d';c.textAlign='right';
  if(max>hi)c.fillText('↑ '+max.toFixed(2),w-8,14);if(min<lo)c.fillText('↓ '+min.toFixed(2),w-8,h-10);c.textAlign='left';
- c.lineWidth=1;c.strokeStyle='#954b36';c.beginPath();c.moveTo(cursor,20);c.lineTo(cursor,h-23);c.stroke();c.fillStyle='#85412d';c.fillText(t('现在','Now'),cursor-8,14);
+ c.lineWidth=1;c.strokeStyle='#954b36';c.beginPath();c.moveTo(cursor,20);c.lineTo(cursor,h-23);c.stroke();c.fillStyle='#85412d';if(!small)c.fillText(t('现在','Now'),cursor-8,14);
  const events=changes.filter(e=>e.time>=start&&e.time<=start+now);
  for(const e of events){const x=X(e.time-start);c.fillRect(x-1,h-26,2,5)}
  const latest=events.at(-1);if(latest&&!pending)el('event').textContent=t('政策记录 · 第 ','Policy record · Period ')+latest.time+'　'+latest.key+' = '+latest.value;
